@@ -26,6 +26,7 @@ impl VaultWatcher {
             let Ok(events) = result else { return };
             let relevant = events
                 .iter()
+                .filter(|event| !event.kind.is_access())
                 .flat_map(|event| event.paths.iter())
                 .any(|p| is_relevant_path(p));
             if relevant {
