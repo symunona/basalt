@@ -1,9 +1,16 @@
 use std::{
-    fs,
+    cmp::Reverse,
+    collections::HashMap,
     path::{Path, PathBuf},
+    sync::Arc,
+    thread,
 };
 
+use dua_core::{Options, Order};
+
 use super::{Error, Note, Result};
+
+const MAX_THREADS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq)]
 #[allow(missing_docs)]
@@ -27,70 +34,109 @@ impl VaultEntry {
 }
 
 impl VaultEntry {
-    /// Walks `path` into a [`VaultEntry`], recursing into directories.
+    /// Walks `path` into a [`VaultEntry`], recursing into directories. Directories are read in
+    /// parallel, so the order of entries within a directory is unspecified.
     ///
     /// `skip` is called with the path of each directory entry, relative to `path`, and whether
-    /// the entry is a directory, before the entry is read. A skipped directory is never
-    /// descended into.
+    /// the entry is a directory. It may be called more than once for the same entry. A skipped
+    /// directory is never descended into.
     ///
     /// Symbolic links below `path` are not followed into directories: a symlinked file is
     /// included as a note, while a symlinked directory or a dangling symlink is left out. This
     /// keeps the walk inside the vault and safe from symlink loops. `path` itself may be a
     /// symlink.
-    pub(crate) fn walk(path: &Path, skip: &dyn Fn(&Path, bool) -> bool) -> Result<Self> {
-        Self::walk_from(path, path, !path.is_file(), skip)
-    }
-
-    fn walk_from(
-        root: &Path,
+    pub(crate) fn walk(
         path: &Path,
-        is_dir: bool,
-        skip: &dyn Fn(&Path, bool) -> bool,
+        skip: impl Fn(&Path, bool) -> bool + Send + Sync + 'static,
     ) -> Result<Self> {
-        // Only notes carry an extension. A dot in a directory name is part of the name, as in
-        // "57.02 Project".
-        let name = if is_dir {
-            path.file_name()
-        } else {
-            path.file_stem()
-        }
-        .map(|file_name| file_name.to_string_lossy().into_owned())
-        .ok_or_else(|| Error::EmptyFileName(path.to_path_buf()))?;
-
-        if !is_dir {
-            // Note::try_from follows symlinks, so it accepts a symlinked file but rejects a
-            // symlinked directory, a dangling symlink or any other non-file.
-            let note = Note::try_from((name, path.to_path_buf()))?;
+        if path.is_file() {
+            let note = Note::try_from((name(path, false)?, path.to_path_buf()))?;
             return Ok(VaultEntry::File(note));
         }
 
+        let symlink_resolving_root = path.join("");
+        let skip = Arc::new(skip);
+        let descend = {
+            let skip = Arc::clone(&skip);
+            let root = symlink_resolving_root.clone();
+            move |entry: &dua_core::Entry| {
+                let path = entry.path();
+                entry.depth == 0 || !skip(path.strip_prefix(&root).unwrap_or(&path), true)
+            }
+        };
+        let threads = thread::available_parallelism().map_or(1, |n| n.get().min(MAX_THREADS));
+        let walk = dua_core::walk(
+            &symlink_resolving_root,
+            threads,
+            Order::Completion,
+            Options::default().skip_metadata(),
+            descend,
+        );
+
+        let mut children: HashMap<PathBuf, Vec<VaultEntry>> = HashMap::new();
+        let mut directories = Vec::new();
+        for entry in walk.flatten().filter(|entry| entry.depth > 0) {
+            let entry_path = entry.path();
+            let relative = entry_path
+                .strip_prefix(&symlink_resolving_root)
+                .unwrap_or(&entry_path);
+            let is_dir = entry.file_type.is_dir();
+            if skip(relative, is_dir) {
+                continue;
+            }
+
+            let path = path.join(relative);
+            if is_dir {
+                directories.push(path);
+            } else if entry.file_type.is_file() {
+                let note = Note::new_unchecked(&name(&path, false)?, &path);
+                push_child(&mut children, &path, VaultEntry::File(note));
+            } else if let Ok(note) = Note::try_from((name(&path, false)?, path.clone())) {
+                push_child(&mut children, &path, VaultEntry::File(note));
+            }
+        }
+
+        directories.sort_by_key(|path| Reverse(path.components().count()));
+        for directory in directories {
+            let entry = VaultEntry::Directory {
+                name: name(&directory, true)?,
+                entries: children.remove(&directory).unwrap_or_default(),
+                path: directory.clone(),
+            };
+            push_child(&mut children, &directory, entry);
+        }
+
         Ok(VaultEntry::Directory {
-            name,
+            name: name(path, true)?,
             path: path.to_path_buf(),
-            entries: fs::read_dir(path)
-                .into_iter()
-                .flatten()
-                .filter_map(|entry| {
-                    let entry = entry.ok()?;
-                    let path = entry.path();
-                    // DirEntry::file_type does not follow symlinks, so a symlinked directory
-                    // is not a directory here.
-                    let is_dir = entry.file_type().ok()?.is_dir();
-                    if skip(path.strip_prefix(root).unwrap_or(&path), is_dir) {
-                        return None;
-                    }
-                    // NOTE: Might want to propagate the walk errors further up
-                    Self::walk_from(root, &path, is_dir, skip).ok()
-                })
-                .collect(),
+            entries: children.remove(path).unwrap_or_default(),
         })
+    }
+}
+
+fn name(path: &Path, is_dir: bool) -> Result<String> {
+    if is_dir {
+        path.file_name()
+    } else {
+        path.file_stem()
+    }
+    .map(|name| name.to_string_lossy().into_owned())
+    .ok_or_else(|| Error::EmptyFileName(path.to_path_buf()))
+}
+
+fn push_child(children: &mut HashMap<PathBuf, Vec<VaultEntry>>, path: &Path, entry: VaultEntry) {
+    if let Some(parent) = path.parent() {
+        children
+            .entry(parent.to_path_buf())
+            .or_default()
+            .push(entry);
     }
 }
 
 impl TryFrom<&Path> for VaultEntry {
     type Error = Error;
     fn try_from(value: &Path) -> Result<Self> {
-        Self::walk(value, &|_, _| false)
+        Self::walk(value, |_, _| false)
     }
 }
 
@@ -123,7 +169,11 @@ impl FindNote for VaultEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::RefCell, path::PathBuf};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{Arc, Mutex},
+    };
     use tempfile::tempdir;
 
     fn names(entries: &[VaultEntry]) -> Vec<&str> {
@@ -161,22 +211,48 @@ mod tests {
         fs::write(dir.path().join("skipped/nested/note.md"), "").unwrap();
         fs::write(dir.path().join("kept.md"), "").unwrap();
 
-        let visited = RefCell::new(Vec::<PathBuf>::new());
-        let skip = |path: &Path, _| {
-            visited.borrow_mut().push(path.to_path_buf());
+        let visited = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+        let recorded = Arc::clone(&visited);
+        let skip = move |path: &Path, _| {
+            recorded.lock().unwrap().push(path.to_path_buf());
             path == Path::new("skipped")
         };
 
-        let Ok(VaultEntry::Directory { entries, .. }) = VaultEntry::walk(dir.path(), &skip) else {
+        let Ok(VaultEntry::Directory { entries, .. }) = VaultEntry::walk(dir.path(), skip) else {
             panic!("expected a directory");
         };
 
         assert_eq!(names(&entries), ["kept"]);
-        let mut visited = visited.into_inner();
+        let mut visited = visited.lock().unwrap().clone();
         visited.sort();
+        visited.dedup();
         assert_eq!(
             visited,
             [PathBuf::from("kept.md"), PathBuf::from("skipped")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_reads_a_symlinked_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("vault/folder")).unwrap();
+        fs::write(dir.path().join("vault/folder/note.md"), "").unwrap();
+        let link = dir.path().join("linked vault");
+        symlink(dir.path().join("vault"), &link).unwrap();
+
+        let Ok(VaultEntry::Directory { name, entries, .. }) = VaultEntry::walk(&link, |_, _| false)
+        else {
+            panic!("expected a directory");
+        };
+
+        assert_eq!(name, "linked vault");
+        let note = link.join("folder/note.md");
+        assert_eq!(
+            entries.find_note(&note).map(Note::path),
+            Some(note.as_path())
         );
     }
 
@@ -202,7 +278,7 @@ mod tests {
         )
         .unwrap();
 
-        let Ok(VaultEntry::Directory { entries, .. }) = VaultEntry::walk(dir.path(), &|_, _| false)
+        let Ok(VaultEntry::Directory { entries, .. }) = VaultEntry::walk(dir.path(), |_, _| false)
         else {
             panic!("expected a directory");
         };
