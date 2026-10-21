@@ -85,6 +85,7 @@ gold = "#f6c177"
 | `code-bg` | Background of fenced code blocks (a raised surface reads best) |
 | `blockquote` | Block-quote bar and text |
 | `list-marker` | List bullets and ordered-list numbers |
+| `link` | Link text in the read view (default `lightblue`) |
 | `task` | Task check-box marker |
 | `mode-insert` | Status-bar mode block: insert / edit |
 | `mode-normal` | Status-bar mode block: vim normal |

@@ -10,7 +10,7 @@ use crate::{
     note_editor::{
         ast::{self, SourceRange},
         highlight::{self, Token},
-        rich_text::RichText,
+        rich_text::{self, RichText},
         text_wrap::wrap_preserve_trailing,
         virtual_document::{
             content_span, empty_virtual_line, synthetic_span, virtual_line, wrap_marker_span,
@@ -995,6 +995,7 @@ pub fn task<'a>(
                 return VirtualBlock::new(&[], source_range);
             };
 
+            let rich_text = text;
             let text = text.to_string();
             let (marker, text) = match kind {
                 ast::TaskKind::Unchecked => (
@@ -1020,6 +1021,9 @@ pub fn task<'a>(
                 option,
                 symbols,
             );
+            if matches!(option, RenderStyle::Reader) {
+                lines = style_links(lines, rich_text, theme.link);
+            }
 
             lines.extend(rest.iter().flat_map(|node| {
                 render_node(node, prefix.merge("  ".into()), list_depth + 1, context).lines
@@ -1058,6 +1062,7 @@ pub fn item<'a>(
                 return VirtualBlock::new(&[], source_range);
             };
 
+            let rich_text = text;
             let text = text.to_string();
 
             let marker = match kind {
@@ -1082,6 +1087,9 @@ pub fn item<'a>(
                 option,
                 symbols,
             );
+            if matches!(option, RenderStyle::Reader) {
+                lines = style_links(lines, rich_text, theme.link);
+            }
 
             lines.extend(rest.iter().flat_map(|node| {
                 render_node(node, prefix.merge("  ".into()), list_depth + 1, context).lines
@@ -1092,6 +1100,82 @@ pub fn item<'a>(
     };
 
     VirtualBlock::new(&lines, source_range)
+}
+
+/// Colours the link text of `text` in `lines`, the wrapped rendering of it. The
+/// content spans hold `text` in order, though line breaks may be dropped, so
+/// each span is split into runs that are inside or outside a link.
+fn style_links<'a>(
+    lines: Vec<VirtualLine<'a>>,
+    text: &RichText,
+    color: Color,
+) -> Vec<VirtualLine<'a>> {
+    let segments = text.segments();
+    if !segments
+        .iter()
+        .any(|segment| segment.style == Some(rich_text::Style::Link))
+    {
+        return lines;
+    }
+
+    let plain: Vec<(u8, bool)> = segments
+        .iter()
+        .flat_map(|segment| {
+            let link = segment.style == Some(rich_text::Style::Link);
+            segment.content.bytes().map(move |byte| (byte, link))
+        })
+        .collect();
+    let mut pos = 0;
+
+    lines
+        .into_iter()
+        .map(|line| {
+            let spans: Vec<VirtualSpan<'a>> = line
+                .virtual_spans()
+                .iter()
+                .flat_map(|span| {
+                    let VirtualSpan::Content(span, range) = span else {
+                        return vec![span.clone()];
+                    };
+                    let content = span.content.as_ref();
+                    let mut runs: Vec<(usize, bool)> = Vec::new();
+                    for (index, char) in content.char_indices() {
+                        while char != '\n' && plain.get(pos).is_some_and(|(b, _)| *b == b'\n') {
+                            pos += 1;
+                        }
+                        let link = plain.get(pos).is_some_and(|(_, link)| *link);
+                        pos += char.len_utf8();
+                        if runs.last().is_none_or(|(_, last)| *last != link) {
+                            runs.push((index, link));
+                        }
+                    }
+                    if runs.len() <= 1 && !runs.first().is_some_and(|(_, link)| *link) {
+                        return vec![VirtualSpan::Content(span.clone(), range.clone())];
+                    }
+                    runs.iter()
+                        .enumerate()
+                        .map(|(i, (start, link))| {
+                            let end = runs.get(i + 1).map_or(content.len(), |(end, _)| *end);
+                            let style = match link {
+                                true => span.style.fg(color),
+                                false => span.style,
+                            };
+                            let source_start = (range.start + start).min(range.end);
+                            let source_end = match i + 1 == runs.len() {
+                                true => range.end,
+                                false => (range.start + end).min(range.end),
+                            };
+                            VirtualSpan::Content(
+                                Span::styled(content[*start..end].to_string(), style),
+                                source_start..source_end,
+                            )
+                        })
+                        .collect()
+                })
+                .collect();
+            VirtualLine::new(&spans)
+        })
+        .collect()
 }
 
 /// Pairs each line of parsed `text` with the source range of the line it comes
@@ -1767,15 +1851,21 @@ pub fn render_node<'a>(
             symbols,
             theme,
         ),
-        Paragraph { text, source_range } => paragraph(
-            content,
-            prefix,
-            text,
-            source_range,
-            max_width,
-            option,
-            symbols,
-        ),
+        Paragraph { text, source_range } => {
+            let mut block = paragraph(
+                content,
+                prefix,
+                text,
+                source_range,
+                max_width,
+                option,
+                symbols,
+            );
+            if matches!(option, RenderStyle::Reader) {
+                block.lines = style_links(block.lines, text, theme.link);
+            }
+            block
+        }
         CodeBlock {
             lang,
             text,
@@ -1817,5 +1907,53 @@ pub fn render_node<'a>(
             option,
             symbols,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::note_editor::{parser, virtual_document::CodeCache};
+
+    fn link_text(content: &str, width: usize) -> Vec<String> {
+        let symbols = Symbols::unicode();
+        let theme = Theme::default();
+        let mut code_cache = CodeCache::default();
+        let mut context = RenderContext {
+            content,
+            max_width: width,
+            horizontal_offset: 0,
+            option: &RenderStyle::Reader,
+            symbols: &symbols,
+            theme: &theme,
+            code_cache: &mut code_cache,
+        };
+        parser::from_str(content)
+            .iter()
+            .flat_map(|node| render_node(node, Span::default(), 0, &mut context).lines)
+            .flat_map(|line| line.virtual_spans().to_vec())
+            .filter_map(|span| match span {
+                VirtualSpan::Content(span, _) if span.style.fg == Some(theme.link) => {
+                    Some(span.content.to_string())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_reader_colours_links() {
+        assert_eq!(
+            link_text(
+                "see [site](https://x.y) and [[note|alias]] end\n\n- item [[b]]",
+                80
+            ),
+            ["site", "alias", "b"]
+        );
+    }
+
+    #[test]
+    fn test_reader_colours_wrapped_link() {
+        assert_eq!(link_text("aaaa [[bbbb cccc]] dddd", 10), ["bbbb ", "cccc"]);
     }
 }

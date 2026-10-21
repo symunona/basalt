@@ -37,6 +37,8 @@ pub struct Theme {
     pub blockquote: Color,
     /// List bullets and ordered-list numbers.
     pub list_marker: Color,
+    /// Link text in the read view.
+    pub link: Color,
     /// Task check-box marker.
     pub task: Color,
     /// Editor mode indicator: insert / edit (writing).
@@ -205,6 +207,7 @@ impl Default for Theme {
             line_highlight: None,
             blockquote: Color::Magenta,
             list_marker: Color::DarkGray,
+            link: Color::LightBlue,
             task: Color::Magenta,
             mode_insert: Color::Green,
             mode_normal: Color::Gray,
@@ -275,6 +278,7 @@ struct TomlTheme {
     line_highlight: Option<String>,
     blockquote: Option<String>,
     list_marker: Option<String>,
+    link: Option<String>,
     task: Option<String>,
     mode_insert: Option<String>,
     mode_normal: Option<String>,
@@ -394,6 +398,7 @@ impl From<TomlTheme> for Theme {
             },
             blockquote: color(value.blockquote, default.blockquote),
             list_marker: color(value.list_marker, default.list_marker),
+            link: color(value.link, default.link),
             task: color(value.task, default.task),
             mode_insert: color(value.mode_insert, default.mode_insert),
             mode_normal: color(value.mode_normal, default.mode_normal),

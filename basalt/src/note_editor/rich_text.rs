@@ -2,13 +2,14 @@ use std::{borrow::Cow, fmt, vec::IntoIter};
 
 use pulldown_cmark::CowStr;
 
-/// A style that can be applied to [`TextSegment`] (code, emphasis, strikethrough, strong).
+/// A style that can be applied to [`TextSegment`] (code, emphasis, strikethrough, strong, link).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Style {
     Code,
     Emphasis,
     Strong,
     Strikethrough,
+    Link,
 }
 
 impl fmt::Display for Style {
@@ -18,6 +19,7 @@ impl fmt::Display for Style {
             Style::Emphasis => write!(f, "Emphasis"),
             Style::Strong => write!(f, "Strong"),
             Style::Strikethrough => write!(f, "Strikethrough"),
+            Style::Link => write!(f, "Link"),
         }
     }
 }

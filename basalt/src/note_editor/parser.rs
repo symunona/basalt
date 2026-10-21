@@ -118,6 +118,7 @@ impl<'a> Parser<'a> {
         let mut nodes = Vec::new();
         let mut text_segments = Vec::new();
         let mut inline_styles = Vec::new();
+        let mut in_link = false;
 
         match tag {
             Tag::List(Some(start)) => {
@@ -151,6 +152,9 @@ impl<'a> Parser<'a> {
                     nodes.extend(self.metadata_node(source_range));
                 }
 
+                Event::Start(Tag::Link { .. }) => in_link = true,
+                Event::End(TagEnd::Link) => in_link = false,
+
                 Event::Rule => nodes.push(self.source_node(source_range)),
 
                 Event::TaskListMarker(checked) => {
@@ -171,6 +175,9 @@ impl<'a> Parser<'a> {
                     inline_styles.iter().for_each(|style| {
                         text_segment.add_style(style);
                     });
+                    if in_link {
+                        text_segment.add_style(&Style::Link);
+                    }
                     text_segments.push(text_segment);
                 }
 
