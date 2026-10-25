@@ -347,6 +347,23 @@ impl<'a> NoteEditorState<'a> {
         }
     }
 
+    fn enter_insert_at(&mut self, offset: usize) {
+        self.commit_text_buffer();
+        self.text_buffer = None;
+        let block_idx = self.block_index_for_offset(offset).unwrap_or(0);
+        self.enter_insert(block_idx);
+    }
+
+    fn ensure_buffer_contains_cursor(&mut self) {
+        let offset = self.cursor.source_offset();
+        let outside = self.text_buffer.as_ref().is_some_and(|buffer| {
+            !buffer.source_range.contains(&offset) && buffer.source_range.end != offset
+        });
+        if outside {
+            self.enter_insert_at(offset);
+        }
+    }
+
     pub fn exit_insert(&mut self) {
         if matches!(self.view, View::Read) {
             return;
@@ -382,6 +399,7 @@ impl<'a> NoteEditorState<'a> {
     }
 
     pub fn insert_char(&mut self, c: char) {
+        self.ensure_buffer_contains_cursor();
         if let Some(buffer) = &mut self.text_buffer {
             let source_pos = self.cursor.source_offset();
             buffer.insert_char(c, source_pos);
@@ -405,6 +423,7 @@ impl<'a> NoteEditorState<'a> {
     }
 
     pub fn delete_char(&mut self) -> Option<()> {
+        self.ensure_buffer_contains_cursor();
         // Comments for my own sanity :)
         // 1. Check if we have a text buffer return if not
         let buffer = self.text_buffer()?;
@@ -938,6 +957,8 @@ impl<'a> NoteEditorState<'a> {
     pub fn cursor_left(&mut self, amount: usize) {
         use cursor::Message::*;
 
+        self.ensure_buffer_contains_cursor();
+
         let prev_block_idx = self.current_block_idx();
         self.cursor.update(
             MoveLeft(amount),
@@ -951,6 +972,8 @@ impl<'a> NoteEditorState<'a> {
 
     pub fn cursor_right(&mut self, amount: usize) {
         use cursor::Message::*;
+
+        self.ensure_buffer_contains_cursor();
 
         let prev_block_idx = self.current_block_idx();
         self.cursor.update(
@@ -996,7 +1019,7 @@ impl<'a> NoteEditorState<'a> {
         if matches!(self.view, View::Edit(..)) {
             if let Some(block) = self.block_index_for_offset(offset) {
                 if self.editing_block != Some(block) {
-                    self.enter_insert(block);
+                    self.enter_insert_at(offset);
                 }
             }
         }
@@ -1150,7 +1173,10 @@ impl<'a> NoteEditorState<'a> {
             }
         });
 
-        self.enter_insert(target_block_idx);
+        match target_offset {
+            Some(offset) => self.enter_insert_at(offset),
+            None => self.enter_insert(target_block_idx),
+        }
 
         self.virtual_document.layout(
             &self.filename,
