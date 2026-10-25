@@ -1,12 +1,12 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{
         mpsc::{self, Receiver},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use basalt_core::obsidian::VaultFilter;
@@ -17,6 +17,7 @@ use notify_debouncer_full::{
 };
 
 const DEBOUNCE: Duration = Duration::from_millis(250);
+const IGNORED_WRITE_WINDOW: Duration = Duration::from_secs(2);
 
 type VaultDebouncer = Debouncer<RecommendedWatcher, RecommendedCache>;
 
@@ -28,6 +29,7 @@ pub struct VaultWatcher {
     filter: Arc<VaultFilter>,
     /// Directories watched one by one, or `None` if the whole vault is watched recursively.
     watched_dirs: Option<HashSet<PathBuf>>,
+    ignored_writes: HashMap<PathBuf, Instant>,
 }
 
 impl VaultWatcher {
@@ -80,6 +82,7 @@ impl VaultWatcher {
             root,
             filter,
             watched_dirs,
+            ignored_writes: HashMap::new(),
         })
     }
 
@@ -87,15 +90,25 @@ impl VaultWatcher {
         &self.path
     }
 
+    pub fn ignore_write(&mut self, path: &Path) {
+        if let Ok(path) = path.canonicalize() {
+            self.ignored_writes.insert(path, Instant::now());
+        }
+    }
+
     /// Drains all pending events and returns true if at least one of them is relevant to the
     /// explorer. Keeps the per-directory watches in step with the events.
     pub fn drain(&mut self) -> bool {
+        self.ignored_writes
+            .retain(|_, written_at| written_at.elapsed() < IGNORED_WRITE_WINDOW);
         let mut received = false;
         while let Ok(paths) = self.rx.try_recv() {
             for path in &paths {
                 self.update_watches(path);
             }
-            received |= paths.iter().any(|p| has_relevant_extension(p));
+            received |= paths
+                .iter()
+                .any(|p| has_relevant_extension(p) && !self.ignored_writes.contains_key(p));
         }
         received
     }
@@ -319,6 +332,32 @@ mod tests {
             watched(&watcher),
             HashSet::from([root.to_path_buf(), root.join("c"), root.join("c/d")])
         );
+    }
+
+    #[test]
+    fn watcher_skips_ignored_writes_but_reports_others() {
+        let dir = tempdir().unwrap();
+        let note = dir.path().join("note.md");
+        fs::write(&note, "").unwrap();
+
+        let mut watcher = VaultWatcher::new(dir.path(), VaultFilter::default()).unwrap();
+        std::thread::sleep(DEBOUNCE * 2);
+        watcher.drain();
+        watcher.ignore_write(&note);
+        fs::write(&note, "autosaved").unwrap();
+
+        let received = (0..6).any(|_| {
+            std::thread::sleep(DEBOUNCE);
+            watcher.drain()
+        });
+        assert!(!received);
+
+        fs::write(dir.path().join("other.md"), "").unwrap();
+        let received = (0..20).any(|_| {
+            std::thread::sleep(DEBOUNCE);
+            watcher.drain()
+        });
+        assert!(received);
     }
 
     #[cfg(unix)]
