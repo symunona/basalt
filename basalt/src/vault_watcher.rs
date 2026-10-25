@@ -51,6 +51,7 @@ impl VaultWatcher {
             let Ok(events) = result else { return };
             let paths: Vec<PathBuf> = events
                 .iter()
+                .filter(|event| !event.kind.is_access())
                 .flat_map(|event| event.paths.iter())
                 .filter(|p| !is_ignored(&event_root, &event_filter, p))
                 .cloned()
