@@ -28,6 +28,7 @@ impl fmt::Display for Style {
 pub struct TextSegment {
     pub content: String,
     pub style: Option<Style>,
+    pub link: Option<Range<usize>>,
 }
 
 impl TextSegment {
@@ -35,6 +36,7 @@ impl TextSegment {
         Self {
             content: content.to_string(),
             style,
+            link: None,
         }
     }
 
@@ -46,6 +48,7 @@ impl TextSegment {
         Self {
             content: '\n'.to_string(),
             style: None,
+            link: None,
         }
     }
 
@@ -53,6 +56,7 @@ impl TextSegment {
         Self {
             content: content.to_string(),
             style: None,
+            link: None,
         }
     }
 
@@ -60,6 +64,15 @@ impl TextSegment {
         Self {
             content: content.to_string(),
             style: Some(style),
+            link: None,
+        }
+    }
+
+    pub fn link(content: &str, source: Range<usize>) -> Self {
+        Self {
+            content: content.to_string(),
+            style: Some(Style::Link),
+            link: Some(source),
         }
     }
 }
@@ -135,17 +148,23 @@ impl RichText {
         }
     }
 
-    pub fn link_ranges(&self) -> Vec<Range<usize>> {
-        self.segments
-            .iter()
-            .scan(0, |start, segment| {
-                let range = *start..*start + segment.content.len();
-                *start = range.end;
-                Some((range, segment))
-            })
-            .filter(|(_, segment)| segment.style == Some(Style::Link))
-            .map(|(range, _)| range)
-            .collect()
+    pub fn links(&self) -> Vec<(Range<usize>, Range<usize>)> {
+        let mut links: Vec<(Range<usize>, Range<usize>)> = Vec::new();
+        let mut start = 0;
+        for segment in &self.segments {
+            let range = start..start + segment.content.len();
+            start = range.end;
+            let Some(source) = &segment.link else {
+                continue;
+            };
+            match links.last_mut() {
+                Some((last, last_source)) if last.end == range.start && last_source == source => {
+                    last.end = range.end
+                }
+                _ => links.push((range, source.clone())),
+            }
+        }
+        links
     }
 }
 
