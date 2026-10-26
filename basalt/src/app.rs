@@ -31,8 +31,7 @@ use crate::{
     command,
     completion::{self, CompletionState, Dropdown},
     config::{
-        self, symbol::Symbols, Autosave, Config, Keystroke, LineNumbers, NoteEditorMode, TabsSync,
-        Theme,
+        self, symbol::Symbols, Config, Keystroke, LineNumbers, NoteEditorMode, TabsSync, Theme,
     },
     debug_log::{self, DebugLogModal, DebugLogModalState, LogLevel},
     explorer::{self, Explorer, ExplorerState, Item, Visibility},
@@ -448,14 +447,14 @@ fn leaves_note(state: &AppState, message: &Message) -> bool {
 }
 
 fn autosave_on_leave(config: &Config, state: &mut AppState, message: &Message) {
-    if config.autosave == Autosave::OnLeave && leaves_note(state, message) {
+    if config.autosave && leaves_note(state, message) {
         let result = state.tabs.autosave_active();
         record_autosaves(state, result);
     }
 }
 
 fn schedule_idle_autosave(config: &Config, state: &mut AppState, now: Instant) {
-    if config.autosave == Autosave::OnIdle {
+    if config.autosave {
         state.autosave_deadline = Some(now + config.autosave_delay);
     }
 }
@@ -581,7 +580,7 @@ fn request_quit(state: &mut AppState) {
 }
 
 fn quit(config: &Config, state: &mut AppState) {
-    if config.autosave != Autosave::Off {
+    if config.autosave {
         let results = state.tabs.autosave_all();
         record_autosaves(state, results);
     }
@@ -1023,7 +1022,7 @@ impl<'a> App<'a> {
             }
         }
 
-        if config.autosave != Autosave::Off {
+        if config.autosave {
             let results = state.tabs.autosave_all();
             record_autosaves(&mut state, results);
         }
@@ -1390,13 +1389,7 @@ impl<'a> App<'a> {
                 rebuild_outline(state, config);
                 state.workspace_dirty = true;
             }
-            Message::CloseTab => {
-                if config.autosave == Autosave::OnIdle {
-                    let result = state.tabs.autosave_active();
-                    record_autosaves(state, result);
-                }
-                request_close_tab(state, config);
-            }
+            Message::CloseTab => request_close_tab(state, config),
             Message::UnsavedModal(message) => return resolve_unsaved(state, config, message),
             Message::Exec(command) => {
                 let (note_name, note_path) = state
@@ -1530,7 +1523,7 @@ impl<'a> App<'a> {
                         state.explorer.notes()
                     });
                     let left_edit_view = was_editing && !editor.is_editing();
-                    if config.autosave == Autosave::OnLeave && left_edit_view {
+                    if config.autosave && left_edit_view {
                         let autosaved = state.tabs.autosave_active();
                         record_autosaves(state, autosaved);
                     }
@@ -1827,7 +1820,7 @@ mod tests {
     #[test]
     fn quit_with_autosave_saves_edits_instead_of_asking() {
         let config = Config {
-            autosave: Autosave::OnIdle,
+            autosave: true,
             ..Config::default()
         };
         let dir = tempfile::tempdir().unwrap();
@@ -2002,7 +1995,7 @@ mod tests {
         );
     }
 
-    fn config(autosave: Autosave) -> Config<'static> {
+    fn config(autosave: bool) -> Config<'static> {
         Config {
             autosave,
             ..Config::default()
@@ -2027,11 +2020,11 @@ mod tests {
     }
 
     #[test]
-    fn on_leave_saves_the_active_note_when_switching_tabs() {
+    fn leaving_saves_the_active_note_when_switching_tabs() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = state_with_edited_tabs(dir.path(), &["a", "b"]);
 
-        autosave_on_leave(&config(Autosave::OnLeave), &mut state, &Message::TabNext);
+        autosave_on_leave(&config(true), &mut state, &Message::TabNext);
 
         assert_eq!(state.autosaved_paths, [dir.path().join("b.md")]);
         assert_eq!(fs::read_to_string(dir.path().join("b.md")).unwrap(), "b");
@@ -2040,12 +2033,12 @@ mod tests {
     }
 
     #[test]
-    fn on_leave_saves_when_focus_leaves_the_editor() {
+    fn leaving_saves_when_focus_leaves_the_editor() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = state_with_edited_tabs(dir.path(), &["a"]);
 
         autosave_on_leave(
-            &config(Autosave::OnLeave),
+            &config(true),
             &mut state,
             &Message::SetActivePane(ActivePane::Explorer),
         );
@@ -2054,11 +2047,11 @@ mod tests {
     }
 
     #[test]
-    fn on_leave_ignores_messages_that_stay_on_the_note() {
+    fn leave_autosave_ignores_messages_that_stay_on_the_note() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = state_with_edited_tabs(dir.path(), &["a"]);
         let same_note = state.tabs.active_note().cloned().unwrap();
-        let config = config(Autosave::OnLeave);
+        let config = config(true);
 
         autosave_on_leave(&config, &mut state, &Message::SelectNote(same_note));
         autosave_on_leave(
@@ -2081,7 +2074,7 @@ mod tests {
     fn autosave_off_never_saves() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = state_with_edited_tabs(dir.path(), &["a"]);
-        let config = config(Autosave::Off);
+        let config = config(false);
         let now = Instant::now();
 
         autosave_on_leave(&config, &mut state, &Message::TabNext);
@@ -2093,10 +2086,10 @@ mod tests {
     }
 
     #[test]
-    fn on_idle_saves_every_modified_tab_once_the_delay_passes() {
+    fn idle_saves_every_modified_tab_once_the_delay_passes() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = state_with_edited_tabs(dir.path(), &["a", "b"]);
-        let config = config(Autosave::OnIdle);
+        let config = config(true);
         let now = Instant::now();
 
         schedule_idle_autosave(&config, &mut state, now);
@@ -2113,17 +2106,5 @@ mod tests {
             [dir.path().join("a.md"), dir.path().join("b.md")]
         );
         assert!(state.autosave_deadline.is_none());
-    }
-
-    #[test]
-    fn on_leave_does_not_save_on_idle() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut state = state_with_edited_tabs(dir.path(), &["a"]);
-        let now = Instant::now();
-
-        schedule_idle_autosave(&config(Autosave::OnLeave), &mut state, now);
-        autosave_when_idle(&mut state, now + Duration::from_secs(60));
-
-        assert!(!dir.path().join("a.md").exists());
     }
 }
