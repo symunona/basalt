@@ -98,6 +98,7 @@ pub struct AppState<'a> {
     autosave_deadline: Option<Instant>,
     autosaved_paths: Vec<PathBuf>,
     pending_tab_hydration: bool,
+    opener_failures: command::OpenerFailures,
     outline: OutlineState,
     toasts: Vec<Toast>,
 
@@ -999,6 +1000,15 @@ impl<'a> App<'a> {
                 }
             }
 
+            for failure in state.opener_failures.drain() {
+                App::update(
+                    self.terminal.get_mut(),
+                    &config,
+                    &mut state,
+                    Some(command::opener_failure_toast(&failure)),
+                );
+            }
+
             if last_tick.elapsed() >= tick_rate {
                 App::update(
                     self.terminal.get_mut(),
@@ -1441,7 +1451,7 @@ impl<'a> App<'a> {
             }
 
             Message::FollowLink(note_editor::LinkTarget::Url(url)) => {
-                return command::open_url(&url);
+                return command::open_url(&url, &state.opener_failures);
             }
             Message::FollowLink(note_editor::LinkTarget::Wikilink(name)) => {
                 // The explorer tree is a few hundred milliseconds behind the disk at
