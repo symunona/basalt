@@ -989,15 +989,15 @@ impl<'a> App<'a> {
             autosave_when_idle(&mut state, Instant::now());
             self.ignore_autosaved_writes(&mut state);
 
-            if self.watcher_has_changes() {
-                self.request_vault_scan(&state.vault);
-            }
-
             if let Some(entries) = self.poll_vault_scan(&state.vault) {
                 let mut message = Some(Message::RescanVault(entries));
                 while message.is_some() {
                     message = App::update(self.terminal.get_mut(), &config, &mut state, message);
                 }
+            }
+
+            if self.watcher_has_changes() {
+                self.request_vault_scan(&state.vault);
             }
 
             for failure in state.opener_failures.drain() {
